@@ -14,7 +14,8 @@
 #include <string.h>
 
 #define APPNAME "XP Code"
-#define APPVER  "1.0.0"
+#define APPVER  "1.1.0"
+#define APPDATE "2026-10-03"   /* release date of APPVER */
 
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020A
@@ -103,7 +104,8 @@ typedef struct Doc {
     int top, left;                 /* first visible line, horizontal px */
     int valid;                     /* lexer states valid up to this line */
     FILETIME ft; int ftAsked;
-    int enc;                       /* 0 ansi, 1 utf-8 bom */
+    int enc;                       /* 0 ansi, 1 utf-8 bom, 2 utf-8 */
+    int lossy;                     /* chars the ANSI code page could not hold became ? */
 } Doc;
 
 #define MAXDOCS 64
@@ -170,9 +172,9 @@ enum {
   CM_INDENT, CM_OUTDENT, CM_INSLINEBELOW, CM_INSLINEABOVE, CM_TRIMWS,
   CM_PALETTE, CM_EXPLORER, CM_SEARCH, CM_RUNVIEW, CM_TOGGLESIDE, CM_TOGGLEPANEL,
   CM_PROBLEMS, CM_OUTPUT, CM_TERMINAL, CM_ZOOMIN, CM_ZOOMOUT, CM_ZOOMRESET, CM_MINIMAP,
-  CM_QUICKOPEN, CM_GOTOLINE, CM_NEXTTAB, CM_PREVTAB, CM_GOTOBRACKET, CM_NEXTPROB, CM_PREVPROB,
+  CM_QUICKOPEN, CM_GOTOLINE, CM_GOTOSYM, CM_NEXTTAB, CM_PREVTAB, CM_GOTOBRACKET, CM_NEXTPROB, CM_PREVPROB,
   CM_RUN, CM_BUILD, CM_STOP, CM_NEWTERM, CM_KILLTERM, CM_CLEARTERM, CM_NEXTTERM, CM_PREVTERM,
-  CM_ABOUT, CM_SHORTCUTS, CM_REVEAL, CM_SETTINGS, CM_COPYPATH, CM_LANG, CM_EOL, CM_INDENTMODE,
+  CM_ABOUT, CM_SHORTCUTS, CM_REVEAL, CM_SETTINGS, CM_COPYPATH, CM_LANG, CM_EOL, CM_INDENTMODE, CM_ENCODING,
   CM_LAST
 };
 
@@ -231,7 +233,7 @@ void prob_goto(int i);
 void prob_next(int dir);
 
 /* ---- palette.c ---- */
-enum { PAL_CMD, PAL_FILE, PAL_LINE, PAL_INPUT, PAL_PICK };
+enum { PAL_CMD, PAL_FILE, PAL_LINE, PAL_INPUT, PAL_PICK, PAL_SYM };
 typedef void (*PalCb)(const char *text, int index);
 void pal_register(void);
 void pal_show(int mode, const char *init);
@@ -252,6 +254,7 @@ int  file_exists(const char *p);
 int  dir_exists(const char *p);
 void path_join(char *out, const char *a, const char *b);
 const char *path_name(const char *p);
+int in_list(const char *list, const char *s, int n, int icase);
 void path_dir(char *out, const char *p);
 int  read_file(const char *path, char **buf, int *len);
 int  skip_build_dir(const char *name);

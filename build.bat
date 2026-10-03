@@ -6,6 +6,9 @@ cd /d "%~dp0"
 set TCC=tcc
 if exist "%~dp0tcc\tcc.exe" set TCC="%~dp0tcc\tcc.exe"
 if not exist build mkdir build
+rem A running build\xpcode.exe cannot be overwritten, but it can be moved.
+if exist build\xpcode.exe del /f /q build\xpcode.exe >nul 2>nul
+if exist build\xpcode.exe move /y build\xpcode.exe "%TEMP%\xpcode-%RANDOM%.old" >nul
 echo Compiling xpcode.exe...
 %TCC% -mwindows -Wall -o build\xpcode.exe src\editor.c src\explorer.c src\main.c src\palette.c src\syntax.c src\terminal.c -luser32 -lgdi32 -lkernel32
 if errorlevel 1 goto fail

@@ -2,7 +2,9 @@
 
 A small code editor for Windows XP in the style of VS Code. It is plain
 Win32 C, built with Tiny C Compiler, and the whole program is one
-**192 KB** exe with no runtime, no Electron and no browser engine.
+**193 KB** exe with no runtime, no Electron and no browser engine.
+
+Current version: **1.1.0** (2026-10-03). See [Changes](#changes).
 
 ![Editor with terminal](docs/editor.png)
 
@@ -30,6 +32,8 @@ a real cmd.exe terminal, and a Problems panel fed by compiler output.
 - Minimap, zoom, and a custom dark scroll bar.
 - Reloads a file when it changes on disk, and asks first if you have unsaved edits.
 - Keeps CRLF or LF line endings as the file had them. Reads UTF-8 (with or without BOM).
+- Click the encoding in the status bar to save as UTF-8, UTF-8 with BOM or Windows (ANSI).
+  New files are UTF-8.
 
 ### Workbench
 - Activity bar with Explorer, Search and Run views.
@@ -39,10 +43,18 @@ a real cmd.exe terminal, and a Problems panel fed by compiler output.
   `dist`, `__pycache__`, `target` and `obj`.
 - Tabs with a dot for unsaved changes, breadcrumbs, and a status bar.
 - Side bar and bottom panel can be resized and hidden.
-- Command Palette (Ctrl+Shift+P or F1), Quick Open (Ctrl+P) and Go to Line (Ctrl+G),
-  all with fuzzy matching.
+- Command Palette (Ctrl+Shift+P or F1), Quick Open (Ctrl+P), Go to Line (Ctrl+G) and
+  Go to Symbol (Ctrl+Shift+O, or `@` in Quick Open), all with fuzzy matching.
+  Go to Symbol lists functions, structs, classes and defines in C, JavaScript and Python,
+  headings in Markdown, sections in INI files and labels in batch files.
+- Quick Open skips hidden and system files (Thumbs.db, desktop.ini) and build output
+  such as .exe, .dll, .obj and .pyc.
+- The mouse wheel scrolls whatever is under the pointer, as on newer Windows.
+  Over the tab strip it switches tabs.
 
 ![Command Palette](docs/palette.png)
+
+![Go to Symbol](docs/symbols.png)
 
 ### Terminal
 - A real `cmd.exe` in the bottom panel. Open as many as you like.
@@ -51,6 +63,8 @@ a real cmd.exe terminal, and a Problems panel fed by compiler output.
 - Select with the mouse, copy, paste (right-click copies a selection, or pastes).
 - Scrollback.
 - Closing a terminal ends every process it started (it uses a Job Object).
+- If a program is still running when you press F5 or Ctrl+Shift+B, the command goes to a
+  new terminal instead of the running program's input.
 
 ### Problems
 - Reads errors and warnings printed in any terminal:
@@ -90,6 +104,7 @@ window size and layout, and the zoom level.
 | Ctrl+Shift+P, F1 | Command Palette |
 | Ctrl+P | Quick Open |
 | Ctrl+G | Go to Line |
+| Ctrl+Shift+O | Go to Symbol |
 | Ctrl+K Ctrl+O | Open Folder |
 | Ctrl+N / Ctrl+O / Ctrl+S | New / Open / Save |
 | Ctrl+K S | Save All |
@@ -116,6 +131,7 @@ window size and layout, and the zoom level.
 | F8 / Shift+F8 | Next / previous problem |
 | Ctrl++ / Ctrl+- / Ctrl+0 | Zoom in / out / reset |
 | Ctrl+, | Open settings |
+| Help > About | Version and build date |
 | Ctrl+K Ctrl+S | List all shortcuts |
 
 ## Settings
@@ -146,7 +162,8 @@ this repo) and run:
 build.bat
 ```
 
-From Linux, with an `i386-win32-tcc` cross compiler and Wine:
+From Linux or macOS, with an `i386-win32-tcc` cross compiler and any host C
+compiler (no Wine needed):
 
 ```
 TCC=i386-win32-tcc ./build.sh
@@ -180,9 +197,51 @@ res/             icon and manifest
 ## Limits
 
 - Text is converted to the ANSI code page when loaded. UTF-8 files open
-  and save, but characters outside that code page are lost.
+  and save, but characters outside that code page show as ?. XP Code warns
+  when a file has such characters and asks before saving over them.
 - No word wrap, no multiple cursors, no split editors, no extensions.
 - The terminal is cmd.exe through pipes, not a console. Full-screen console
   programs (edit, more with paging) will not draw correctly.
 - Tested under Wine 9 (see screenshots). Not yet tested on a real XP
   machine, with MSVC output, or with XP visual styles turned on.
+
+## Changes
+
+### 1.1.0 (2026-10-03)
+
+Fixes:
+- Every editor line now ends with a 0 byte, so bracket matching and
+  Backspace never read past the end of a line. NUL bytes in a file no
+  longer count as brackets.
+- Opening a UTF-8 file with characters the ANSI code page cannot hold no
+  longer loses them silently: XP Code says so on load and asks before saving.
+- F5 and Ctrl+Shift+B no longer type into a program that is still running.
+  They open a new terminal instead. A command sent to a brand new terminal
+  now waits for its first prompt, so it is not shown twice.
+- F5 on a C file no longer tries to start the exe when the compile fails
+  (Wine's cmd.exe ignored the `&&`).
+- The folder picker leaked the shell's item list each time; it now frees it.
+- An unknown file type with a long extension could overflow a message
+  buffer in F5. Run commands now use bounded formatting.
+- The terminal now checks that its reader thread started.
+- `build.bat` can rebuild `build\xpcode.exe` while that exe is running (it
+  moves the locked file out of the way first).
+- `tools/rsrc.c` places the new section after the larger of the last
+  section's virtual and raw sizes, so it can never overlap.
+
+Improvements:
+- Help > About shows the version, release date and build time.
+- Go to Symbol (Ctrl+Shift+O or `@`).
+- Encoding picker in the status bar; new files default to UTF-8.
+- Quick Open keeps its file list until the folder changes, instead of
+  rescanning every time it opens. It skips hidden, system and binary files.
+- The Explorer hides hidden and system files.
+- The find bar paints through a back buffer, so it no longer flickers.
+- The mouse wheel goes to the pane under the pointer; over tabs it
+  switches tabs.
+- `build.sh` builds the resource tool with the host compiler, so it no
+  longer needs Wine.
+
+### 1.0.0 (2026-10-03)
+
+First release.

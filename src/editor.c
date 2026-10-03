@@ -26,6 +26,9 @@ static void line_reserve(Line *L, int n)
     }
 }
 
+/* every line keeps a 0 after its last char, so a peek at s[len] is safe */
+#define line_end(L) ((L)->s[(L)->len] = 0)
+
 static void lines_reserve(Doc *d, int n)
 {
     if (n > d->cap) {
@@ -39,7 +42,7 @@ static void insert_lines(Doc *d, int at, int count)
     int i;
     lines_reserve(d, d->n + count);
     memmove(d->ln + at + count, d->ln + at, (d->n - at) * sizeof(Line));
-    for (i = 0; i < count; i++) { memset(&d->ln[at + i], 0, sizeof(Line)); line_reserve(&d->ln[at + i], 0); }
+    for (i = 0; i < count; i++) { memset(&d->ln[at + i], 0, sizeof(Line)); line_reserve(&d->ln[at + i], 0); line_end(&d->ln[at + i]); }
     d->n += count;
 }
 
@@ -47,7 +50,7 @@ Doc *doc_new(void)
 {
     Doc *d = (Doc *)xalloc(sizeof(Doc));
     insert_lines(d, 0, 1);
-    d->crlf = 1; d->savedCu = 0; d->valid = 1;
+    d->crlf = 1; d->savedCu = 0; d->valid = 1; d->enc = 2;
     return d;
 }
 
@@ -80,6 +83,7 @@ static void raw_insert(Doc *d, int l, int c, const char *t, int n, int *el, int 
         memmove(L->s + c + n, L->s + c, tail);
         memcpy(L->s + c, t, n);
         L->len += n;
+        line_end(L);
         *el = l; *ec = c + n;
     } else {
         int start = 0, li = l;
@@ -93,6 +97,7 @@ static void raw_insert(Doc *d, int l, int c, const char *t, int n, int *el, int 
                 line_reserve(M, M->len + k);
                 memcpy(M->s + M->len, t + start, k);
                 M->len += k;
+                line_end(M);
                 if (i < n) li++;
                 start = i + 1;
             }
@@ -103,6 +108,7 @@ static void raw_insert(Doc *d, int l, int c, const char *t, int n, int *el, int 
             line_reserve(M, M->len + tail);
             memcpy(M->s + M->len, tailbuf, tail);
             M->len += tail;
+            line_end(M);
             free(tailbuf);
         }
     }
@@ -124,6 +130,7 @@ static void raw_delete(Doc *d, int l1, int c1, int l2, int c2)
         memmove(d->ln + l1 + 1, d->ln + l2 + 1, (d->n - l2 - 1) * sizeof(Line));
         d->n -= l2 - l1;
     }
+    line_end(A);
     if (d->valid > l1 + 1) d->valid = l1 + 1;
 }
 
@@ -252,15 +259,18 @@ static int is_utf8(const unsigned char *s, int n, int *high)
     return 1;
 }
 
-static char *convert_cp(const char *s, int n, UINT from, UINT to, int *outn)
+/* lossy (when not 0) is set if some chars had no match in the target page */
+static char *convert_cp(const char *s, int n, UINT from, UINT to, int *outn, int *lossy)
 {
+    BOOL def = 0;
     int wn = MultiByteToWideChar(from, 0, s, n, 0, 0), m;
     WCHAR *w = (WCHAR *)malloc((wn + 1) * sizeof(WCHAR));
     char *o;
     MultiByteToWideChar(from, 0, s, n, w, wn);
     m = WideCharToMultiByte(to, 0, w, wn, 0, 0, 0, 0);
     o = (char *)malloc(m + 1);
-    WideCharToMultiByte(to, 0, w, wn, o, m, 0, 0);
+    WideCharToMultiByte(to, 0, w, wn, o, m, 0, lossy ? &def : 0);
+    if (lossy) *lossy = def;
     o[m] = 0; free(w);
     *outn = m;
     return o;
@@ -292,12 +302,14 @@ int doc_load(Doc *d, const char *path)
     if (!read_file(path, &buf, &len)) return 0;
     for (i = 0; i < d->n; i++) free(d->ln[i].s);
     d->n = 0;
-    d->enc = 0; t = buf;
+    d->enc = 0; d->lossy = 0; t = buf;
     if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
-        d->enc = 1; t = convert_cp(buf + 3, len - 3, CP_UTF8, CP_ACP, &len); free(buf); buf = t;
-    } else if (is_utf8((unsigned char *)buf, len, &high) && high) {
-        d->enc = 2; t = convert_cp(buf, len, CP_UTF8, CP_ACP, &len); free(buf); buf = t;
+        d->enc = 1; t = convert_cp(buf + 3, len - 3, CP_UTF8, CP_ACP, &len, &d->lossy); free(buf); buf = t;
+    } else if (is_utf8((unsigned char *)buf, len, &high)) {
+        d->enc = 2;   /* plain ASCII counts as UTF-8, like VS Code */
+        if (high) { t = convert_cp(buf, len, CP_UTF8, CP_ACP, &len, &d->lossy); free(buf); buf = t; }
     }
+    if (d->lossy) out_log("%s has characters that Windows %u cannot show; they appear as ?.", path_name(path), GetACP());
     d->crlf = 0;
     for (i = 0; i < len; i++) if (buf[i] == '\n') { d->crlf = i > 0 && buf[i-1] == '\r'; break; }
     if (i == len) d->crlf = 1;
@@ -313,6 +325,7 @@ int doc_load(Doc *d, const char *path)
             line_reserve(L, e - start);
             memcpy(L->s, buf + start, e - start);
             L->len = e - start;
+            line_end(L);
             if (L->len && L->s[0] == '\t') tabs++;
             else if (L->len > 1 && L->s[0] == ' ' && L->s[1] == ' ') spaces++;
             start = i + 1;
@@ -345,7 +358,7 @@ int doc_write(Doc *d, const char *path)
     }
     n = (int)(p - b);
     o = b; outn = n;
-    if (d->enc) o = convert_cp(b, n, CP_ACP, CP_UTF8, &outn);
+    if (d->enc) o = convert_cp(b, n, CP_ACP, CP_UTF8, &outn, 0);
     h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
     if (h == INVALID_HANDLE_VALUE) { if (o != b) free(o); free(b); return 0; }
     if (d->enc == 1) WriteFile(h, "\xEF\xBB\xBF", 3, &w, 0);
@@ -608,7 +621,7 @@ static int bracket_near(Doc *d, int *l, int *c)
 {
     Line *L = &d->ln[d->cl];
     if (d->cc < L->len && strchr("()[]{}", L->s[d->cc]) && L->s[d->cc]) { *l = d->cl; *c = d->cc; return 1; }
-    if (d->cc > 0 && strchr("()[]{}", L->s[d->cc - 1])) { *l = d->cl; *c = d->cc - 1; return 1; }
+    if (d->cc > 0 && L->s[d->cc - 1] && strchr("()[]{}", L->s[d->cc - 1])) { *l = d->cl; *c = d->cc - 1; return 1; }
     return 0;
 }
 
@@ -1275,9 +1288,10 @@ int find_visible(void) { return g_find && IsWindowVisible(g_find); }
 
 static void find_paint(HWND w)
 {
-    PAINTSTRUCT ps; HDC dc = BeginPaint(w, &ps);
+    PAINTSTRUCT ps; HDC wdc = BeginPaint(w, &ps), dc;
     RECT r; HGDIOBJ of; char buf[64]; int i;
     GetClientRect(w, &r);
+    dc = bb_begin(w, wdc, r.right, r.bottom);
     fill(dc, 0, 0, r.right, r.bottom, C_WIDGET);
     vline(dc, 0, 0, r.bottom, C_FOCUS);
     hline(dc, 0, r.bottom - 1, r.right, XRGB(0x45,0x45,0x45));
@@ -1312,6 +1326,7 @@ static void find_paint(HWND w)
         TextOutA(dc, fbtn[7].left + 1, fbtn[7].top + 4, "All", 3);
     }
     SelectObject(dc, of);
+    BitBlt(wdc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
     EndPaint(w, &ps);
 }
 
@@ -1529,7 +1544,7 @@ static void key_down(HWND w, int vk)
             int ind = indent_of(L), rm = 1;
             begin(d, 1);
             d->typing = 0;
-            if (c > 0 && c < L->len && strchr("([{\"'`", L->s[c-1]) && L->s[c] == ")]}\"'`"[strchr("([{\"'`", L->s[c-1]) - "([{\"'`"])
+            if (c > 0 && c < L->len && L->s[c-1] && strchr("([{\"'`", L->s[c-1]) && L->s[c] == ")]}\"'`"[strchr("([{\"'`", L->s[c-1]) - "([{\"'`"])
                 { ed_del(d, l, c - 1, l, c + 1); break; }
             if (!d->tabs && c <= ind && c >= 4 && L->s[c-1] == ' ') { rm = c % 4 ? c % 4 : 4; }
             ed_del(d, l, c - rm, l, c);

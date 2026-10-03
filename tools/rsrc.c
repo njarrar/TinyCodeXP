@@ -65,7 +65,8 @@ int main(int argc, char **argv)
     sh = opt + optSize;
     if ((u32)(sh + 40 * (nsec + 1) - exe) > rd32(opt + 60)) { fprintf(stderr, "rsrc: no room for a section header\n"); return 1; }
     last = sh + 40 * (nsec - 1);
-    va = align(rd32(last + 12) + rd32(last + 8), secAlign);
+    /* the larger of VirtualSize and SizeOfRawData, so the new section never overlaps */
+    va = align(rd32(last + 12) + (rd32(last + 8) > rd32(last + 16) ? rd32(last + 8) : rd32(last + 16)), secAlign);
     raw = align(exeN, fileAlign);
 
     /* icons: each image is RT_ICON n, plus one RT_GROUP_ICON listing them */

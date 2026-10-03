@@ -95,7 +95,7 @@ static const char *kw_bat =
  " lss leq gtr geq nul enabledelayedexpansion enableextensions on off xcopy find findstr dir path"
  " prompt ver vol color choice timeout where ";
 
-static int in_list(const char *list, const char *s, int n, int icase)
+int in_list(const char *list, const char *s, int n, int icase)
 {
     char w[64]; const char *p;
     if (n <= 0 || n > 60) return 0;

@@ -23,6 +23,16 @@ static char **s_files; static int s_nfiles, s_fcap, s_filesValid;
 
 void files_invalidate(void) { s_filesValid = 0; }
 
+/* build output and other files nobody opens in a text editor */
+static int binary_ext(const char *n)
+{
+    char e[16]; const char *d = strrchr(n, '.');
+    if (!d || lstrlenA(d) > 12) return 0;
+    wsprintfA(e, " %s ", d);
+    CharLowerA(e);
+    return strstr(" .exe .dll .obj .o .a .lib .pdb .ilk .exp .res .pyc .class .zip .7z ", e) != 0;
+}
+
 static void scan(const char *dir, int depth)
 {
     WIN32_FIND_DATAA fd; HANDLE h; char pat[MAX_PATH], full[MAX_PATH];
@@ -32,11 +42,13 @@ static void scan(const char *dir, int depth)
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (fd.cFileName[0] == '.' && (!fd.cFileName[1] || fd.cFileName[1] == '.')) continue;
+        if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;
         path_join(full, dir, fd.cFileName);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (fd.cFileName[0] == '.' || skip_build_dir(fd.cFileName)) continue;
             scan(full, depth + 1);
         } else {
+            if (binary_ext(fd.cFileName)) continue;
             if (s_nfiles >= s_fcap) { s_fcap = s_fcap * 2 + 256; s_files = (char **)realloc(s_files, s_fcap * sizeof(char *)); }
             s_files[s_nfiles++] = xstrdup(full);
         }
@@ -113,15 +125,66 @@ static PItem *add_item(const char *text, const char *detail, const char *path, c
     return p;
 }
 
+/* ------------------------------------------------------------------ symbols */
+
+static int is_id(int c) { return c == '_' || (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z'); }
+
+/* copies the identifier at s into out; returns its length */
+static int take_id(const char *s, char *out)
+{
+    int n = 0;
+    while (is_id((unsigned char)s[n]) && n < 63) { out[n] = s[n]; n++; }
+    out[n] = 0;
+    return n;
+}
+
+/* one pass over the active file: functions, types, defines, headings, labels */
+static void sym_items(void)
+{
+    Doc *d = cur_doc();
+    int i;
+    if (!d) return;
+    for (i = 0; i < d->n; i++) {
+        const char *s = d->ln[i].s, *p, *kind = 0;
+        char name[64]; int len = d->ln[i].len;
+        name[0] = 0;
+        if (!len) continue;
+        p = s; while (*p == ' ' || *p == '\t') p++;
+        switch (d->lang) {
+        case L_C: case L_JS:
+            if (!strncmp(s, "#define ", 8)) { take_id(s + 8, name); kind = "define"; }
+            else if (!strncmp(p, "function ", 9)) { take_id(p + 9, name); kind = "function"; }
+            else if (!strncmp(p, "class ", 6)) { take_id(p + 6, name); kind = "class"; }
+            else if ((!strncmp(s, "struct ", 7) || !strncmp(s, "enum ", 5) || !strncmp(s, "typedef struct ", 15)) && !strchr(s, ';')) {
+                const char *q = strrchr(s, ' '); if (q && is_id((unsigned char)q[1])) { take_id(q + 1, name); kind = "struct"; }
+                else if (!strncmp(s, "typedef struct ", 15)) { take_id(s + 15, name); kind = "struct"; }
+            } else if (is_id((unsigned char)s[0]) && s[len - 1] != ';' && (p = strchr(s, '(')) != 0) {
+                const char *q = p; while (q > s && q[-1] == ' ') q--;
+                while (q > s && is_id((unsigned char)q[-1])) q--;
+                if (q < p && !in_list(" if while for switch return sizeof ", name, take_id(q, name), 0)) kind = "function";
+            }
+            break;
+        case L_PY:
+            if (!strncmp(p, "def ", 4)) { take_id(p + 4, name); kind = "function"; }
+            else if (!strncmp(p, "class ", 6)) { take_id(p + 6, name); kind = "class"; }
+            break;
+        case L_MD: if (s[0] == '#') { lstrcpynA(name, s, sizeof(name)); kind = "heading"; } break;
+        case L_INI: if (s[0] == '[') { lstrcpynA(name, s, sizeof(name)); kind = "section"; } break;
+        case L_BAT: if (p[0] == ':' && p[1] != ':') { take_id(p + 1, name); kind = "label"; } break;
+        }
+        if (kind && name[0]) add_item(name, kind, 0, 0, i);
+    }
+}
+
 static void build_items(void)
 {
     int i;
     clear_items();
-    if (s_mode == PAL_CMD) {
+    if (s_mode == PAL_SYM) sym_items();
+    else if (s_mode == PAL_CMD) {
         for (i = 0; i < cmd_count(); i++) add_item(cmd_name(cmd_at(i)), 0, 0, cmd_key(cmd_at(i)), cmd_at(i));
     } else if (s_mode == PAL_FILE) {
-        s_filesValid = 0;
-        ensure_files();
+        ensure_files();   /* the folder watcher calls files_invalidate() */
         for (i = 0; i < g_ndocs; i++) if (g_docs[i]->path[0]) {
             char dir[MAX_PATH]; path_dir(dir, g_docs[i]->path);
             add_item(g_docs[i]->name, rel_path(dir) == dir ? dir : rel_path(dir), g_docs[i]->path, "open", -1);
@@ -151,9 +214,10 @@ static void filter(void)
     /* VS Code style prefixes switch modes */
     if (s_mode == PAL_FILE && q[0] == '>') { s_mode = PAL_CMD; build_items(); }
     else if (s_mode == PAL_FILE && q[0] == ':') { s_mode = PAL_LINE; clear_items(); }
-    else if ((s_mode == PAL_CMD && q[0] != '>') || (s_mode == PAL_LINE && q[0] != ':')) { s_mode = PAL_FILE; build_items(); }
+    else if (s_mode == PAL_FILE && q[0] == '@') { s_mode = PAL_SYM; build_items(); }
+    else if ((s_mode == PAL_CMD && q[0] != '>') || (s_mode == PAL_LINE && q[0] != ':') || (s_mode == PAL_SYM && q[0] != '@')) { s_mode = PAL_FILE; build_items(); }
     pq = q;
-    if ((s_mode == PAL_CMD || s_mode == PAL_LINE) && *pq) pq++;
+    if ((s_mode == PAL_CMD || s_mode == PAL_LINE || s_mode == PAL_SYM) && *pq) pq++;
     while (*pq == ' ') pq++;
     s_nview = 0; s_sel = 0; s_top = 0;
     s_hasHits = *pq != 0;
@@ -248,6 +312,7 @@ static void accept(int row)
         if (d && ln > 0) { ed_goto(d, ln - 1, col - 1, 1); SetFocus(g_edit); }
         break;
     }
+    case PAL_SYM: { Doc *d = cur_doc(); int ln = p->id; pal_close(); if (d && ln < d->n) { ed_goto(d, ln, 0, 1); SetFocus(g_edit); } break; }
     case PAL_PICK: { int id = p->id; char t[256]; lstrcpynA(t, p->text, sizeof(t)); pal_close(); if (cb) cb(t, id); break; }
     }
 }
@@ -385,7 +450,7 @@ static void open_pal(int mode, const char *init)
     }
     if (f != s_ed && f != g_pal) s_prevFocus = f;
     s_mode = mode;
-    if (mode == PAL_FILE || mode == PAL_CMD) build_items();
+    if (mode == PAL_FILE || mode == PAL_CMD || mode == PAL_SYM) build_items();
     s_closing = 1;
     SetWindowTextA(s_ed, init);
     s_closing = 0;
@@ -401,6 +466,7 @@ void pal_show(int mode, const char *init)
     s_cb = 0;
     if (mode == PAL_CMD) open_pal(PAL_CMD, init && init[0] ? init : ">");
     else if (mode == PAL_LINE) open_pal(PAL_LINE, ":");
+    else if (mode == PAL_SYM) open_pal(PAL_SYM, "@");
     else open_pal(PAL_FILE, init ? init : "");
 }
 

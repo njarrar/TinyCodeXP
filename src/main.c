@@ -349,6 +349,7 @@ static const CmdDef s_cmds[] = {
     { CM_PALETTE, "View: Show All Commands", "Ctrl+Shift+P" },
     { CM_QUICKOPEN, "Go: Go to File...", "Ctrl+P" },
     { CM_GOTOLINE, "Go: Go to Line...", "Ctrl+G" },
+    { CM_GOTOSYM, "Go: Go to Symbol in Editor...", "Ctrl+Shift+O" },
     { CM_GOTOBRACKET, "Go: Go to Bracket", "Ctrl+Shift+\\" },
     { CM_NEXTTAB, "View: Next Editor", "Ctrl+Tab" },
     { CM_PREVTAB, "View: Previous Editor", "Ctrl+Shift+Tab" },
@@ -379,6 +380,7 @@ static const CmdDef s_cmds[] = {
     { CM_LANG, "Change Language Mode", "" },
     { CM_EOL, "Change End of Line Sequence", "" },
     { CM_INDENTMODE, "Toggle Indent with Tabs / Spaces", "" },
+    { CM_ENCODING, "Change File Encoding", "" },
     { CM_SETTINGS, "Preferences: Open Settings (ini)", "Ctrl+," },
     { CM_SHORTCUTS, "Help: Keyboard Shortcuts", "Ctrl+K Ctrl+S" },
     { CM_ABOUT, "Help: About", "" },
@@ -394,7 +396,7 @@ const char *cmd_key(int id) { int i; for (i = 0; i < NCMDS; i++) if (s_cmds[i].i
 typedef struct { BYTE vk, mods; WORD id; BYTE ed; } Bind;
 static const Bind s_binds[] = {
     { 'P', M_CTRL|M_SHIFT, CM_PALETTE, 0 }, { VK_F1, 0, CM_PALETTE, 0 },
-    { 'P', M_CTRL, CM_QUICKOPEN, 0 }, { 'E', M_CTRL, CM_QUICKOPEN, 0 }, { 'G', M_CTRL, CM_GOTOLINE, 0 },
+    { 'P', M_CTRL, CM_QUICKOPEN, 0 }, { 'E', M_CTRL, CM_QUICKOPEN, 0 }, { 'G', M_CTRL, CM_GOTOLINE, 0 }, { 'O', M_CTRL|M_SHIFT, CM_GOTOSYM, 0 },
     { 'N', M_CTRL, CM_NEWFILE, 0 }, { 'O', M_CTRL, CM_OPENFILE, 0 },
     { 'S', M_CTRL, CM_SAVE, 0 }, { 'S', M_CTRL|M_SHIFT, CM_SAVEAS, 0 },
     { 'W', M_CTRL, CM_CLOSE, 0 }, { VK_F4, M_CTRL, CM_CLOSE, 0 },
@@ -719,7 +721,7 @@ static void paint_status(HDC dc)
         else wsprintfA(enc, "Windows %u", GetACP());
         items[n] = lang_name(d->lang); cmds[n++] = CM_LANG;
         items[n] = d->crlf ? "CRLF" : "LF"; cmds[n++] = CM_EOL;
-        items[n] = enc; cmds[n++] = -1;
+        items[n] = enc; cmds[n++] = CM_ENCODING;
         items[n] = ind; cmds[n++] = CM_INDENTMODE;
         items[n] = ln; cmds[n++] = CM_GOTOLINE;
         for (i = 0; i < n; i++) {
@@ -838,6 +840,13 @@ int save_doc(Doc *d, int as)
         if (!d->path[0] && g_folder[0]) path_join(path, g_folder, d->name);
         if (!file_dialog(1, path, "Save As")) return 0;
     }
+    if (d->lossy) {
+        char m[MAX_PATH + 200];
+        snprintf(m, sizeof(m) - 1, "%s has characters that Windows %u cannot show. Saving will replace them with ?.\n\nSave anyway?", d->name, GetACP());
+        m[sizeof(m) - 1] = 0;
+        if (MessageBoxA(g_main, m, APPNAME, MB_YESNO | MB_ICONWARNING) != IDYES) return 0;
+        d->lossy = 0;
+    }
     if (!doc_write(d, path)) {
         char m[MAX_PATH + 64]; wsprintfA(m, "Failed to save\n%s", path);
         MessageBoxA(g_main, m, APPNAME, MB_ICONERROR);
@@ -892,6 +901,7 @@ typedef struct { HWND hwndOwner; void *pidlRoot; LPSTR pszDisplayName; LPCSTR lp
 typedef void *(WINAPI *PSHBrowse)(XBROWSEINFO *);
 typedef BOOL (WINAPI *PSHGetPath)(void *, LPSTR);
 typedef HRESULT (WINAPI *POleInit)(void *);
+typedef void (WINAPI *PCoFree)(void *);
 
 static void pick_folder(void)
 {
@@ -905,7 +915,12 @@ static void pick_folder(void)
     bi.hwndOwner = g_main; bi.pszDisplayName = name; bi.lpszTitle = "Open Folder";
     bi.ulFlags = 0x1 | 0x10 | 0x40;   /* RETURNONLYFSDIRS | EDITBOX | NEWDIALOGSTYLE */
     pidl = br(&bi);
-    if (pidl && gp(pidl, path)) open_folder(path);
+    if (pidl) {
+        PCoFree cf = (PCoFree)dyn("ole32.dll", "CoTaskMemFree");
+        int ok = gp(pidl, path);
+        if (cf) cf(pidl);
+        if (ok) open_folder(path);
+    }
 }
 
 void open_folder(const char *path)
@@ -938,7 +953,7 @@ static void ini_str(const char *key, const char *def, char *out, int n) { GetPri
 static void run_active(void)
 {
     Doc *d = cur_doc();
-    char cmd[MAX_PATH * 4], dir[MAX_PATH], base[MAX_PATH], tool[MAX_PATH], q1[MAX_PATH + 2], q2[MAX_PATH + 2], *dot;
+    char cmd[MAX_PATH * 6], dir[MAX_PATH], base[MAX_PATH], tool[MAX_PATH], q1[MAX_PATH + 2], q2[MAX_PATH + 2], *dot;
     const char *ext;
     if (!d) { run_cmd(CM_BUILD); return; }
     if (!d->path[0] || doc_dirty(d)) if (!save_doc(d, 0)) return;
@@ -954,25 +969,25 @@ static void run_active(void)
         *dot = 0;
         wsprintfA(exe, "%s.exe", base);
         if (strchr(tool, ' ') && tool[0] != '"') quote_into(q1, tool); else lstrcpyA(q1, tool);
-        wsprintfA(cmd, "cd /d \"%s\" && %s \"%s\" -o \"%s\" && \"%s\"", dir, q1, d->name, exe, exe);
+        snprintf(cmd, sizeof(cmd) - 1, "cd /d \"%s\" && %s \"%s\" -o \"%s\" & (if not errorlevel 1 \"%s\")", dir, q1, d->name, exe, exe);
     } else if (!lstrcmpiA(ext, "py") || !lstrcmpiA(ext, "pyw")) {
         ini_str("python", "python", tool, MAX_PATH);
-        wsprintfA(cmd, "cd /d \"%s\" && %s -u \"%s\"", dir, tool, d->name);
+        snprintf(cmd, sizeof(cmd) - 1, "cd /d \"%s\" && %s -u \"%s\"", dir, tool, d->name);
     } else if (!lstrcmpiA(ext, "bat") || !lstrcmpiA(ext, "cmd")) {
-        wsprintfA(cmd, "cd /d \"%s\" && call \"%s\"", dir, d->name);
+        snprintf(cmd, sizeof(cmd) - 1, "cd /d \"%s\" && call \"%s\"", dir, d->name);
     } else if (!lstrcmpiA(ext, "js")) {
-        wsprintfA(cmd, "cd /d \"%s\" && cscript //nologo \"%s\"", dir, d->name);
+        snprintf(cmd, sizeof(cmd) - 1, "cd /d \"%s\" && cscript //nologo \"%s\"", dir, d->name);
     } else if (!lstrcmpiA(ext, "vbs")) {
-        wsprintfA(cmd, "cd /d \"%s\" && cscript //nologo \"%s\"", dir, d->name);
+        snprintf(cmd, sizeof(cmd) - 1, "cd /d \"%s\" && cscript //nologo \"%s\"", dir, d->name);
     } else if (!lstrcmpiA(ext, "html") || !lstrcmpiA(ext, "htm")) {
         quote_into(q2, d->path);
-        wsprintfA(cmd, "start \"\" %s", q2);
+        snprintf(cmd, sizeof(cmd) - 1, "start \"\" %s", q2);
     } else {
-        char m[300]; wsprintfA(m, "Don't know how to run .%s files. F5 runs .c, .py, .bat, .cmd, .js, .vbs and .html.", ext);
-        out_log("%s", m);
+        out_log("Don't know how to run .%.40s files. F5 runs .c, .py, .bat, .cmd, .js, .vbs and .html.", ext);
         set_panel(1);
         return;
     }
+    cmd[sizeof(cmd) - 1] = 0;
     set_panel(2);
     if (!term_count()) term_new();
     term_send(cmd, 1);
@@ -985,7 +1000,8 @@ static void run_build(void)
     path_join(bat, g_folder, "build.bat");
     if (!file_exists(bat)) { out_log("No build.bat found in %s", g_folder); set_panel(1); return; }
     run_cmd(CM_SAVEALL);
-    wsprintfA(cmd, "cd /d \"%s\" && call build.bat", g_folder);
+    snprintf(cmd, sizeof(cmd) - 1, "cd /d \"%s\" && call build.bat", g_folder);
+    cmd[sizeof(cmd) - 1] = 0;
     set_panel(2);
     if (!term_count()) term_new();
     term_send(cmd, 1);
@@ -1010,6 +1026,15 @@ void set_side(int mode)
     layout();
     InvalidateRect(g_side, 0, 0);
     if (mode == 1) search_focus(); else SetFocus(g_side);
+}
+
+static void enc_pick_cb(const char *t, int i)
+{
+    Doc *d = cur_doc();
+    (void)t;
+    if (!d || i < 0) return;
+    d->enc = i; d->savedCu = -1;   /* saving writes the new encoding */
+    chrome_dirty();
 }
 
 static void lang_pick_cb(const char *t, int i)
@@ -1078,6 +1103,7 @@ void run_cmd(int id)
     case CM_PALETTE: pal_show(PAL_CMD, ""); return;
     case CM_QUICKOPEN: pal_show(PAL_FILE, ""); return;
     case CM_GOTOLINE: if (d) pal_show(PAL_LINE, ""); return;
+    case CM_GOTOSYM: if (d) pal_show(PAL_SYM, ""); return;
     case CM_NEXTTAB: if (g_ndocs) { activate_doc((g_cur + 1) % g_ndocs); SetFocus(g_edit); } return;
     case CM_PREVTAB: if (g_ndocs) { activate_doc((g_cur + g_ndocs - 1) % g_ndocs); SetFocus(g_edit); } return;
     case CM_EXPLORER: set_side(0); return;
@@ -1110,6 +1136,7 @@ void run_cmd(int id)
           if (se) se(g_main, "open", "explorer.exe", a, 0, SW_SHOWNORMAL); } } return;
     case CM_COPYPATH: if (d && d->path[0]) clip_set(d->path, lstrlenA(d->path)); return;
     case CM_LANG: if (d) { static const char *names[L_COUNT]; for (i = 0; i < L_COUNT; i++) names[i] = lang_name(i); pal_pick("Select Language Mode", names, L_COUNT, lang_pick_cb); } return;
+    case CM_ENCODING: if (d) { static const char *e[3] = { "Windows (ANSI)", "UTF-8 with BOM", "UTF-8" }; pal_pick("Save with Encoding", e, 3, enc_pick_cb); } return;
     case CM_EOL: if (d) { d->crlf = !d->crlf; d->savedCu = -1; chrome_dirty(); } return;
     case CM_INDENTMODE: if (d) { d->tabs = !d->tabs; status_dirty(); } return;
     case CM_SETTINGS: {
@@ -1124,9 +1151,11 @@ void run_cmd(int id)
     case CM_SHORTCUTS: show_shortcuts(); return;
     case CM_ABOUT:
         {
-            char m[400];
-            wsprintfA(m, APPNAME " " APPVER "\n\nA small VS Code-style editor for Windows XP.\nPlain Win32 C, built with Tiny C Compiler.\n\nEditor font: %s\nSettings: %s", s_monoFace, g_ini);
-            MessageBoxA(g_main, m, APPNAME, MB_ICONINFORMATION);
+            char m[MAX_PATH + 300];
+            snprintf(m, sizeof(m) - 1, APPNAME "\n\nVersion: " APPVER "\nDate: " APPDATE "\nBuilt: " __DATE__ " " __TIME__
+                "\n\nA small VS Code-style editor for Windows XP.\nPlain Win32 C, built with Tiny C Compiler.\n\nEditor font: %s\nSettings: %s", s_monoFace, g_ini);
+            m[sizeof(m) - 1] = 0;
+            MessageBoxA(g_main, m, "About " APPNAME, MB_ICONINFORMATION);
         }
         return;
     }
@@ -1157,7 +1186,7 @@ static const short s_menuDef[] = {
     CM_DELLINE, CM_INDENT, CM_OUTDENT, CM_INSLINEBELOW, CM_INSLINEABOVE, 1,
     CM_PALETTE, 0, CM_EXPLORER, CM_SEARCH, CM_RUNVIEW, 0, CM_PROBLEMS, CM_OUTPUT, CM_TERMINAL, 0,
     CM_TOGGLESIDE, CM_TOGGLEPANEL, CM_MINIMAP, 0, CM_ZOOMIN, CM_ZOOMOUT, CM_ZOOMRESET, 1,
-    CM_QUICKOPEN, CM_GOTOLINE, CM_GOTOBRACKET, 0, CM_NEXTTAB, CM_PREVTAB, 0, CM_NEXTPROB, CM_PREVPROB, 1,
+    CM_QUICKOPEN, CM_GOTOLINE, CM_GOTOSYM, CM_GOTOBRACKET, 0, CM_NEXTTAB, CM_PREVTAB, 0, CM_NEXTPROB, CM_PREVPROB, 1,
     CM_RUN, CM_BUILD, CM_STOP, 1,
     CM_NEWTERM, CM_KILLTERM, CM_CLEARTERM, 0, CM_NEXTTERM, CM_PREVTERM, 1,
     CM_PALETTE, CM_SHORTCUTS, 0, CM_REVEAL, CM_COPYPATH, 0, CM_ABOUT, 1,
@@ -1337,6 +1366,12 @@ static LRESULT CALLBACK MainProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             return TRUE;
         }
         break;
+    case WM_MOUSEWHEEL: {   /* over the tab strip: switch tabs */
+        POINT p; p.x = (short)LOWORD(lp); p.y = (short)HIWORD(lp);
+        ScreenToClient(w, &p);
+        if (p.y < TAB_H && p.x >= s_tabsR.left && g_ndocs > 1) run_cmd((short)HIWORD(wp) > 0 ? CM_PREVTAB : CM_NEXTTAB);
+        return 0;
+    }
     case WM_LBUTTONDOWN: case WM_MBUTTONDOWN: case WM_RBUTTONUP: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), i, oc;
         POINT pt; pt.x = x; pt.y = y;
@@ -1520,6 +1555,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cl, int show)
 
     while (GetMessageA(&msg, 0, 0, 0) > 0) {
         if (global_key(&msg)) continue;
+        if (msg.message == WM_MOUSEWHEEL) {   /* XP sends the wheel to the focus; send it to what is under the mouse */
+            POINT p; HWND h;
+            p.x = (short)LOWORD(msg.lParam); p.y = (short)HIWORD(msg.lParam);
+            h = WindowFromPoint(p);
+            if (h && GetWindowThreadProcessId(h, 0) == GetCurrentThreadId()) msg.hwnd = h;
+        }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }

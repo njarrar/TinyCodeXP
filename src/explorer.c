@@ -80,6 +80,7 @@ static void node_load(Node *n)
             Node *k = 0; int isdir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             char full[MAX_PATH];
             if (!lstrcmpA(fd.cFileName, ".") || !lstrcmpA(fd.cFileName, "..")) continue;
+            if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;   /* Thumbs.db, desktop.ini */
             if (isdir && skip_dir(fd.cFileName)) continue;
             for (i = 0; i < nold; i++) if (old[i] && old[i]->isdir == isdir && !lstrcmpiA(old[i]->name, fd.cFileName)) { k = old[i]; old[i] = 0; break; }
             if (!k) { path_join(full, n->path, fd.cFileName); k = node_new(full, fd.cFileName, isdir, n); }

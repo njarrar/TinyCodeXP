@@ -31,7 +31,8 @@ typedef struct Term {
     int col, esc;
     char in[1024]; int inlen, incur;
     char hist[50][256]; int nhist, histpos;
-    int top, follow, alive, number, serial, atPrompt, isOutput;
+    int top, follow, alive, number, serial, atPrompt, isOutput, ready;
+    char pend[1024];   /* command waiting for the first prompt */
     char cwd[MAX_PATH];
     char echo[1100]; int echoLen, echoPos;
     char **tabList; int tabN, tabI, tabStart; char tabSaved[1024];
@@ -47,6 +48,8 @@ static int s_hasCaret;
 static char s_lineBuf[4096];
 static CRITICAL_SECTION s_qlock;
 static Chunk *s_qhead, *s_qtail;   /* output waiting for the UI thread; one post per batch */
+static void submit2(Term *t, const char *suffix);
+static void term_free(Term *t);
 
 Problem *g_probs; int g_nprobs, g_nerr, g_nwarn;
 static int s_pcap, s_probSel = -1, s_probTop, s_probIdx = -1;
@@ -299,8 +302,13 @@ static void feed(Term *t, const char *d, int n)
         t->atPrompt = 0;
         if (L->len >= 3 && L->len < MAX_PATH && L->s[1] == ':' && L->s[2] == '\\' && L->s[L->len - 1] == '>' && t->col == L->len) {
             memcpy(t->cwd, L->s, L->len - 1); t->cwd[L->len - 1] = 0;
-            t->atPrompt = 1;
+            t->atPrompt = t->ready = 1;
         }
+    }
+    if (t->atPrompt && t->pend[0]) {
+        lstrcpyA(t->in, t->pend); t->pend[0] = 0;
+        t->inlen = t->incur = lstrlenA(t->in);
+        submit2(t, " & echo on");
     }
 }
 
@@ -473,7 +481,11 @@ int term_new(void)
     CloseHandle(pi.hThread);
     arg = (HANDLE *)malloc(2 * sizeof(HANDLE));
     arg[0] = outR; arg[1] = (HANDLE)(INT_PTR)t->serial;
-    CloseHandle(CreateThread(0, 0, reader, arg, 0, 0));
+    {
+        HANDLE th = CreateThread(0, 0, reader, arg, 0, 0);
+        if (!th) { out_log("Could not start the terminal reader (error %lu)", GetLastError()); free(arg); CloseHandle(outR); term_free(t); return -1; }
+        CloseHandle(th);
+    }
     s_terms[s_nterms++] = t;
     s_active = s_nterms - 1;
     s_hasSel = 0;
@@ -587,9 +599,14 @@ void term_send(const char *cmd, int show)
     if (s_active < 0 || s_active >= s_nterms) { if (term_new() < 0) return; }
     t = s_terms[s_active];
     if (!t->alive) { if (term_new() < 0) return; t = s_terms[s_active]; }
-    lstrcpynA(t->in, cmd, sizeof(t->in));
-    t->inlen = t->incur = lstrlenA(t->in);
-    submit2(t, " & echo on");
+    /* a program is still running here: don't type into its stdin, use a new terminal */
+    if (t->ready && !t->atPrompt) { if (term_new() < 0) return; t = s_terms[s_active]; }
+    if (!t->atPrompt) lstrcpynA(t->pend, cmd, sizeof(t->pend));   /* sent once cmd shows its prompt */
+    else {
+        lstrcpynA(t->in, cmd, sizeof(t->in));
+        t->inlen = t->incur = lstrlenA(t->in);
+        submit2(t, " & echo on");
+    }
     follow_bottom(t);
     InvalidateRect(g_term, 0, 0);
 }
