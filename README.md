@@ -17,7 +17,7 @@ a real cmd.exe terminal, and a Problems panel fed by compiler output.
 ## Requirements
 
 - Windows XP SP2 or SP3, 32-bit (also runs on later Windows).
-- No install. Copy `xpcode.exe` anywhere and run it.
+- No install. Download [`build/xpcode.exe`](build/xpcode.exe), copy it anywhere and run it.
 - Optional: TCC to compile C with F5, Python to run `.py` files.
 
 ## Features

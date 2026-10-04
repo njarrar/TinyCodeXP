@@ -1,4 +1,5 @@
-build/
+build/*
+!build/xpcode.exe
 *.obj
 *.o
 xpcode.ini
